@@ -35,9 +35,9 @@ func main() {
 	client, err := signalflow.NewClient(
 		signalflow.StreamURLForRealm(os.Getenv("SFX_REALM")),
 		signalflow.AccessToken(os.Getenv("SFX_TOKEN")),
-		signalflow.WriteTimeout(20*time.Second),
-		signalflow.ReadTimeout(60*time.Second),
-		signalflow.MetadataTimeout(20*time.Second),
+		//signalflow.WriteTimeout(20*time.Second),
+	//	signalflow.ReadTimeout(60*time.Second),
+	//	signalflow.MetadataTimeout(40*time.Second),
 	)
 	if err != nil {
 		level.Error(logger).Log("msg", "Failed to create SFX client "+err.Error())
@@ -62,8 +62,10 @@ func main() {
 		endtimer := time.NewTimer(time.Duration(timeoutSecs) * time.Second)
 		go func() {
 			<-endtimer.C
-			level.Error(logger).Log("msg", "The computation timed out so killing it")
-			data.Stop()
+			if data != nil && !data.IsFinished() {
+				level.Error(logger).Log("msg", "The computation for job ID "+computationJobId+" timed out so killing it")
+				data.Stop()
+			}
 		}()
 
 		if data != nil {
@@ -74,6 +76,7 @@ func main() {
 				level.Info(logger).Log("msg", "Computation started for job "+computationJobId)
 			}
 			timestampCount := 0
+			mtsCount := 0
 			earliestTimestamp := time.Now().Add(10000 * time.Hour)
 			latestTimestamp := time.Now().Add(-10000 * time.Hour)
 			for msg := range data.Data() {
@@ -91,6 +94,7 @@ func main() {
 						if len(meta.CustomProperties) == 0 {
 							level.Warn(logger).Log("msg", "No meta properties for job "+computationJobId)
 						} else {
+							mtsCount = mtsCount + len(meta.CustomProperties)
 							level.Debug(logger).Log("msg", "Got "+strconv.Itoa(len(meta.CustomProperties))+" meta properties for job "+computationJobId)
 						}
 					}
@@ -107,7 +111,7 @@ func main() {
 			if timestampCount == 0 {
 				level.Error(logger).Log("msg", "No messages from job "+computationJobId)
 			} else {
-				level.Info(logger).Log("msg", "Got "+strconv.Itoa(timestampCount)+" messages from job "+computationJobId+" with timestamps from: "+earliestTimestamp.String()+" to "+latestTimestamp.String())
+				level.Info(logger).Log("msg", "Got "+strconv.Itoa(mtsCount)+" datapoints in "+strconv.Itoa(timestampCount)+" messages from job "+computationJobId+" with timestamps from: "+earliestTimestamp.String()+" to "+latestTimestamp.String())
 			}
 		}
 
