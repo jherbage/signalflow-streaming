@@ -26,8 +26,11 @@ func main() {
 	}
 
 	// Play with these for testing
-	resolutionInSeconds := 300
+	lateArrivalSeconds := 20 // the number of seconds after a resolution window timestamp should be expected to show up in the data and should be considered late if not there and therefore deem the results incomplete
+	// lateArrivalSeconds is only relevant if lookBackInSecondsEnd is < than it
+	resolutionInSeconds := 240
 	lookBackInSeconds := 3600
+	lookBackInSecondsEnd := 0
 	flow := "A = data('node_load1').publish(label='A')"
 	timeoutSecs := 300
 	cycleTimeSeconds := 20 // how often to start a new computation - we wont start a computation if the previous one is running
@@ -44,12 +47,13 @@ func main() {
 		panic("Failed to create SFX client " + err.Error())
 	}
 
+	// fixedOlderTime := time.Date(2022, time.Month(2), 17, 10, 0, 0, 0, time.Local)
 	for {
 		start := time.Now().Unix()
 		computationJobId := "not_set"
 		data, err := client.Execute(&signalflow.ExecuteRequest{
 			Program:      flow,
-			StopMs:       time.Now().Unix() * 1000,
+			StopMs:       time.Now().Add(-1*time.Second*time.Duration(lookBackInSecondsEnd)).Unix() * 1000,
 			StartMs:      time.Now().Add(-1*time.Second*time.Duration(lookBackInSeconds)).Unix() * 1000,
 			Immediate:    true,
 			ResolutionMs: int64(resolutionInSeconds * 1000),
@@ -75,15 +79,21 @@ func main() {
 			} else {
 				level.Info(logger).Log("msg", "Computation started for job "+computationJobId)
 			}
-			timestampCount := 0
+			messageCount := 0
+			timestamps := map[int64]int{}
 			mtsCount := 0
 			earliestTimestamp := time.Now().Add(10000 * time.Hour)
 			latestTimestamp := time.Now().Add(-10000 * time.Hour)
 			for msg := range data.Data() {
-				timestampCount++
+				messageCount++
 				if len(msg.Payloads) > 0 {
 
 					for _, pl := range msg.Payloads {
+						if _, ok := timestamps[msg.Timestamp().UnixMilli()]; !ok {
+							timestamps[msg.Timestamp().UnixMilli()] = 1
+						} else {
+							timestamps[msg.Timestamp().UnixMilli()]++
+						}
 						if earliestTimestamp.After(msg.Timestamp()) {
 							earliestTimestamp = msg.Timestamp()
 						}
@@ -108,11 +118,38 @@ func main() {
 				}
 			}
 
-			if timestampCount == 0 {
+			if messageCount == 0 {
 				level.Error(logger).Log("msg", "No messages from job "+computationJobId)
 			} else {
-				level.Info(logger).Log("msg", "Got "+strconv.Itoa(mtsCount)+" datapoints in "+strconv.Itoa(timestampCount)+" messages from job "+computationJobId+" with timestamps from: "+earliestTimestamp.String()+" to "+latestTimestamp.String())
+				data.Lag()
+				level.Info(logger).Log("msg", "Got "+strconv.Itoa(mtsCount)+" datapoints in "+strconv.Itoa(messageCount)+" messages from job "+computationJobId+" with timestamps from: "+earliestTimestamp.String()+" to "+latestTimestamp.String()+". Resolution used was "+strconv.Itoa(int(data.Resolution().Seconds()))+" seconds. Mean timestamp message count is: "+strconv.FormatFloat(float64(messageCount)/float64(len(timestamps)), 'f', 2, 64))
 			}
+
+			// Were the results complete?
+			// Start at the earliest timestamp - if we have it - if we dont its incomplete anyway!
+			// The earlient timestamp will always be a multiple of the resolution since the top of the previous hour that can be fitted in
+			incomplete := false
+			if len(timestamps) == 0 {
+				incomplete = true
+			} else {
+				// the time between first timestamp and lookback (or lateArrivalSeconds if greater)
+				end := lateArrivalSeconds
+				if lateArrivalSeconds < lookBackInSecondsEnd {
+					end = lookBackInSecondsEnd
+				}
+				expectedTimestamps := int(time.Now().Add(-1*time.Duration(end)*time.Second).Sub(earliestTimestamp).Seconds() / data.Resolution().Seconds())
+
+				level.Debug(logger).Log("msg", "Duration of window in seconds is: "+strconv.Itoa(int(time.Now().Add(-1*time.Duration(end)*time.Second).Sub(earliestTimestamp).Seconds())))
+				level.Debug(logger).Log("msg", "Expected timestamps is: "+strconv.Itoa(expectedTimestamps))
+
+				if (len(timestamps) < expectedTimestamps) || float64(messageCount%len(timestamps)) > 0 {
+					incomplete = true
+				}
+			}
+			if incomplete {
+				level.Error(logger).Log("msg", "Job "+computationJobId+" returned incomplete results")
+			}
+
 		}
 
 		if data.Err() != nil {
